@@ -4,7 +4,7 @@
 # Description: Comprehensive Docker CE installation utility for professional environments
 # Author: Amaan Ul Haq Siddiqui - DevSecOps Engineer
 # Version: 2.0
-# Compatible: Ubuntu 20.04+, Debian 11+, CentOS 8+, RHEL 8+
+# Compatible: Ubuntu 20.04+, Debian 11+
 
 set -euo pipefail  # Exit on error, undefined vars, and pipe failures
 
@@ -14,8 +14,8 @@ SCRIPT_VERSION="2.0"
 LOG_FILE="/tmp/docker-install-$(date +%Y%m%d-%H%M%S).log"
 TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
 DOCKER_GPG_URL="https://download.docker.com/linux"
-MINIMUM_DISK_SPACE_GB=10
-MINIMUM_RAM_MB=2048
+MINIMUM_DISK_SPACE_GB=8
+MINIMUM_RAM_MB=1028 
 
 # Color codes for output
 RED='\033[0;31m'
