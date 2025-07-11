@@ -35,9 +35,9 @@ if [ -z "$DBS" ]; then
   exit 1
 fi
 
-echo "Beginning schema-only export."
+echo "Beginning schema-only export..."
 
-# Iterate and export schema for each database
+# Iterate and export schema for each database (with CREATE DATABASE + USE)
 for DB in $DBS; do
   echo "Processing database: $DB"
 
@@ -48,7 +48,7 @@ for DB in $DBS; do
     --skip-lock-tables \
     --set-gtid-purged=OFF \
     --column-statistics=0 \
-    "$DB" >> "$OUTFILE" 2>>"$ERROR_LOG"
+    --databases "$DB" >> "$OUTFILE" 2>>"$ERROR_LOG"
 
   if [ $? -ne 0 ]; then
     echo "Error exporting schema for database: $DB" | tee -a "$ERROR_LOG"
