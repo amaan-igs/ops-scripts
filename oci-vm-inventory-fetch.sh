@@ -1,0 +1,225 @@
+#!/bin/bash
+
+set -euo pipefail
+
+###############################################################################
+# OCI Compute Instance Inventory Export Script
+# Author: Amaan Ul Haq Siddiqui - DevOps Engineer
+# Description: Exports comprehensive inventory of OCI compute 
+#              instances including compartment names, network 
+#              configuration, and image metadata to JSON/CSV.
+###############################################################################
+
+# Configuration: Target region and output settings
+REGION="me-jeddah-1"
+DATE=$(date +%Y%m%d)
+OUTPUT_DIR="oci_vm_inventory_${REGION}_${DATE}"
+LOG_FILE="${OUTPUT_DIR}/vm_inventory.log"
+JSON_OUTPUT="${OUTPUT_DIR}/vm_clean.json"
+CSV_OUTPUT="${OUTPUT_DIR}/vm_inventory.csv"
+TEMP_DIR="${OUTPUT_DIR}/temp"
+
+# Initialize output directory structure
+mkdir -p "$OUTPUT_DIR" "$TEMP_DIR"
+
+echo "-----------------------------------------------------------"
+echo "OCI Compute Instance Inventory Export"
+echo "Region: $REGION | Date: $DATE"
+echo "-----------------------------------------------------------"
+
+echo "Retrieving tenancy configuration..."
+# Extract tenancy OCID from OCI CLI configuration file
+TENANCY_OCID=$(grep '^tenancy' ~/.oci/config | awk -F'=' '{print $2}' | tr -d ' ')
+
+# Validate tenancy OCID is present
+if [[ -z "$TENANCY_OCID" ]]; then
+    echo "ERROR: Unable to determine tenancy OCID from ~/.oci/config" | tee -a "$LOG_FILE"
+    exit 1
+fi
+
+echo "Tenancy OCID: $TENANCY_OCID"
+
+echo "Retrieving compartment hierarchy..."
+# Query OCI for all compartments in the tenancy
+COMPARTMENTS_JSON=$(oci iam compartment list \
+    --compartment-id "$TENANCY_OCID" \
+    --compartment-id-in-subtree true \
+    --all \
+    --output json 2>>"$LOG_FILE")
+
+# Build compartment ID to name mapping
+echo "$COMPARTMENTS_JSON" | jq -r '.data[] | select(."lifecycle-state"=="ACTIVE") | [.id, .name] | @tsv' > "${TEMP_DIR}/compartment_map.tsv"
+
+# Include root tenancy in compartment mapping
+TENANCY_NAME=$(oci iam tenancy get --tenancy-id "$TENANCY_OCID" --query 'data.name' --raw-output 2>>"$LOG_FILE")
+echo -e "${TENANCY_OCID}\t${TENANCY_NAME}" >> "${TEMP_DIR}/compartment_map.tsv"
+
+# Extract list of active compartment OCIDs
+COMPARTMENT_IDS=$(echo "$COMPARTMENTS_JSON" | jq -r '.data[] | select(."lifecycle-state"=="ACTIVE") | .id')
+COMPARTMENT_IDS="$COMPARTMENT_IDS"$'\n'"$TENANCY_OCID"
+
+# Validate compartments were found
+if [[ -z "$COMPARTMENT_IDS" ]]; then
+    echo "ERROR: No active compartments found" | tee -a "$LOG_FILE"
+    exit 1
+fi
+
+COMPARTMENT_COUNT=$(echo "$COMPARTMENT_IDS" | wc -l)
+echo "Discovered $COMPARTMENT_COUNT active compartments"
+
+echo "Collecting compute instance data..."
+# Initialize array to store instance data
+VM_DATA=()
+
+# Iterate through each compartment to collect compute instances
+for COMP_ID in $COMPARTMENT_IDS; do
+    INSTANCES_JSON=$(oci compute instance list \
+        --compartment-id "$COMP_ID" \
+        --all \
+        --region "$REGION" \
+        --output json 2>>"$LOG_FILE" || true)
+    
+    # Append non-empty results to array
+    if [[ -n "$INSTANCES_JSON" && "$INSTANCES_JSON" != "[]" ]]; then
+        VM_DATA+=("$INSTANCES_JSON")
+    fi
+done
+
+echo "Retrieving network configuration for instances..."
+# Begin JSON array output
+echo "[" > "$JSON_OUTPUT"
+first=1
+
+# Process each instance to enrich with network information
+for VM_JSON in "${VM_DATA[@]}"; do
+    INSTANCE_IDS=$(echo "$VM_JSON" | jq -r '.data[].id')
+    
+    for INSTANCE_ID in $INSTANCE_IDS; do
+        # Extract instance metadata
+        INSTANCE_DATA=$(echo "$VM_JSON" | jq --arg id "$INSTANCE_ID" '.data[] | select(.id == $id)')
+        COMP_ID=$(echo "$INSTANCE_DATA" | jq -r '.["compartment-id"]')
+        
+        # Retrieve VNIC attachments for instance
+        VNIC_ATTACHMENTS=$(oci compute vnic-attachment list \
+            --compartment-id "$COMP_ID" \
+            --instance-id "$INSTANCE_ID" \
+            --region "$REGION" \
+            --output json 2>>"$LOG_FILE" || echo '{"data":[]}')
+        
+        # Collect private IP addresses from all attached VNICs
+        PRIVATE_IPS=""
+        VNIC_IDS=$(echo "$VNIC_ATTACHMENTS" | jq -r '.data[] | select(."lifecycle-state"=="ATTACHED") | ."vnic-id"')
+        
+        for VNIC_ID in $VNIC_IDS; do
+            # Query VNIC details for IP information
+            VNIC_INFO=$(oci network vnic get \
+                --vnic-id "$VNIC_ID" \
+                --region "$REGION" \
+                --output json 2>>"$LOG_FILE" || echo '{"data":{}}')
+            
+            # Extract and concatenate private IPs
+            PRIVATE_IP=$(echo "$VNIC_INFO" | jq -r '.data."private-ip" // ""')
+            if [[ -n "$PRIVATE_IP" ]]; then
+                if [[ -z "$PRIVATE_IPS" ]]; then
+                    PRIVATE_IPS="$PRIVATE_IP"
+                else
+                    PRIVATE_IPS="${PRIVATE_IPS};${PRIVATE_IP}"
+                fi
+            fi
+        done
+        
+        # Merge private IPs into instance data
+        ENHANCED_DATA=$(echo "$INSTANCE_DATA" | jq --arg ips "$PRIVATE_IPS" '. + {"private-ips": $ips}')
+        
+        # Write to JSON with proper comma separation
+        if [[ $first -eq 0 ]]; then
+            echo "," >> "$JSON_OUTPUT"
+        fi
+        echo "$ENHANCED_DATA" | jq -c '.' >> "$JSON_OUTPUT"
+        first=0
+    done
+done
+
+# Close JSON array
+echo "]" >> "$JSON_OUTPUT"
+
+echo "Resolving image metadata..."
+# Extract unique image OCIDs from collected instance data
+IMAGE_IDS=$(jq -r '.[] | .["image-id"] // ""' "$JSON_OUTPUT" | sort -u | grep -v '^$')
+
+# Build image OCID to display name mapping
+> "${TEMP_DIR}/image_map.tsv"
+for IMAGE_ID in $IMAGE_IDS; do
+    # Query OCI for image display name
+    IMAGE_NAME=$(oci compute image get \
+        --image-id "$IMAGE_ID" \
+        --region "$REGION" \
+        --query 'data."display-name"' \
+        --raw-output 2>>"$LOG_FILE" || echo "Unknown")
+    echo -e "${IMAGE_ID}\t${IMAGE_NAME}" >> "${TEMP_DIR}/image_map.tsv"
+done
+
+echo "Generating CSV report..."
+
+# Prepare AWK associative arrays from mapping files
+COMP_MAP_AWK=$(awk -F'\t' '{printf "comp[\"%s\"]=\"%s\"; ", $1, $2}' "${TEMP_DIR}/compartment_map.tsv")
+IMAGE_MAP_AWK=$(awk -F'\t' '{printf "img[\"%s\"]=\"%s\"; ", $1, $2}' "${TEMP_DIR}/image_map.tsv")
+
+# Convert JSON to CSV with column headers
+jq -r --arg comp_map "$COMP_MAP_AWK" --arg image_map "$IMAGE_MAP_AWK" '
+    (["VM Name","OCID","Availability Domain","Shape","Compartment Name","Compartment OCID","Region","State","Time Created","Private IPs","Image Name","Image OCID"]),
+    (.[] | [
+        .["display-name"],
+        .id,
+        .["availability-domain"],
+        .shape,
+        .["compartment-id"],
+        .["compartment-id"],
+        .region,
+        .["lifecycle-state"],
+        .["time-created"],
+        (.["private-ips"] // ""),
+        .["image-id"],
+        .["image-id"]
+    ]) | @csv' "$JSON_OUTPUT" > "${TEMP_DIR}/vm_temp.csv"
+
+# Replace OCIDs with human-readable names using mapping tables
+awk -F',' -v OFS=',' '
+    BEGIN {
+        '"$COMP_MAP_AWK"'
+        '"$IMAGE_MAP_AWK"'
+    }
+    NR==1 {print; next}
+    {
+        comp_ocid = $6
+        gsub(/"/, "", comp_ocid)
+        
+        image_ocid = $12
+        gsub(/"/, "", image_ocid)
+        
+        if (comp_ocid in comp) {
+            $5 = "\"" comp[comp_ocid] "\""
+        }
+        
+        if (image_ocid in img) {
+            $11 = "\"" img[image_ocid] "\""
+        }
+        
+        print
+    }
+' "${TEMP_DIR}/vm_temp.csv" > "$CSV_OUTPUT"
+
+# Clean up temporary files
+rm -rf "$TEMP_DIR"
+
+# Calculate summary statistics
+TOTAL_VMS=$(jq 'length' "$JSON_OUTPUT")
+
+echo "-----------------------------------------------------------"
+echo "Inventory export completed successfully"
+echo "-----------------------------------------------------------"
+echo "Total instances discovered: $TOTAL_VMS"
+echo "JSON output: $JSON_OUTPUT"
+echo "CSV output: $CSV_OUTPUT"
+echo "Log file: $LOG_FILE"
+echo "-----------------------------------------------------------"
