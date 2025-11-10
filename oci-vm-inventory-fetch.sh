@@ -78,45 +78,45 @@ for COMP_ID in $COMPARTMENT_IDS; do
         --all \
         --region "$REGION" \
         --output json 2>>"$LOG_FILE" || true)
-    
+
     # Append non-empty results to array
     if [[ -n "$INSTANCES_JSON" && "$INSTANCES_JSON" != "[]" ]]; then
         VM_DATA+=("$INSTANCES_JSON")
     fi
 done
 
-echo "Retrieving network configuration for instances..."
+echo "Retrieving network and storage configuration for instances..."
 # Begin JSON array output
 echo "[" > "$JSON_OUTPUT"
 first=1
 
-# Process each instance to enrich with network information
+# Process each instance to enrich with network and disk information
 for VM_JSON in "${VM_DATA[@]}"; do
     INSTANCE_IDS=$(echo "$VM_JSON" | jq -r '.data[].id')
-    
+
     for INSTANCE_ID in $INSTANCE_IDS; do
         # Extract instance metadata
         INSTANCE_DATA=$(echo "$VM_JSON" | jq --arg id "$INSTANCE_ID" '.data[] | select(.id == $id)')
         COMP_ID=$(echo "$INSTANCE_DATA" | jq -r '.["compartment-id"]')
-        
+
         # Retrieve VNIC attachments for instance
         VNIC_ATTACHMENTS=$(oci compute vnic-attachment list \
             --compartment-id "$COMP_ID" \
             --instance-id "$INSTANCE_ID" \
             --region "$REGION" \
             --output json 2>>"$LOG_FILE" || echo '{"data":[]}')
-        
+
         # Collect private IP addresses from all attached VNICs
         PRIVATE_IPS=""
         VNIC_IDS=$(echo "$VNIC_ATTACHMENTS" | jq -r '.data[] | select(."lifecycle-state"=="ATTACHED") | ."vnic-id"')
-        
+
         for VNIC_ID in $VNIC_IDS; do
             # Query VNIC details for IP information
             VNIC_INFO=$(oci network vnic get \
                 --vnic-id "$VNIC_ID" \
                 --region "$REGION" \
                 --output json 2>>"$LOG_FILE" || echo '{"data":{}}')
-            
+
             # Extract and concatenate private IPs
             PRIVATE_IP=$(echo "$VNIC_INFO" | jq -r '.data."private-ip" // ""')
             if [[ -n "$PRIVATE_IP" ]]; then
@@ -127,10 +127,67 @@ for VM_JSON in "${VM_DATA[@]}"; do
                 fi
             fi
         done
-        
-        # Merge private IPs into instance data
-        ENHANCED_DATA=$(echo "$INSTANCE_DATA" | jq --arg ips "$PRIVATE_IPS" '. + {"private-ips": $ips}')
-        
+
+        # Retrieve boot volume attachments
+        BOOT_VOL_ATTACHMENTS=$(oci compute boot-volume-attachment list \
+            --availability-domain "$(echo "$INSTANCE_DATA" | jq -r '.["availability-domain"]')" \
+            --compartment-id "$COMP_ID" \
+            --instance-id "$INSTANCE_ID" \
+            --region "$REGION" \
+            --output json 2>>"$LOG_FILE" || echo '{"data":[]}')
+
+        # Collect boot volume information
+        DISK_INFO=""
+        BOOT_VOL_IDS=$(echo "$BOOT_VOL_ATTACHMENTS" | jq -r '.data[] | select(."lifecycle-state"=="ATTACHED") | ."boot-volume-id"')
+
+        for BOOT_VOL_ID in $BOOT_VOL_IDS; do
+            BOOT_VOL_DATA=$(oci bv boot-volume get \
+                --boot-volume-id "$BOOT_VOL_ID" \
+                --region "$REGION" \
+                --output json 2>>"$LOG_FILE" || echo '{"data":{}}')
+
+            BOOT_VOL_NAME=$(echo "$BOOT_VOL_DATA" | jq -r '.data."display-name" // "Unknown"')
+            BOOT_VOL_SIZE=$(echo "$BOOT_VOL_DATA" | jq -r '.data."size-in-gbs" // "0"')
+
+            if [[ -n "$BOOT_VOL_NAME" && "$BOOT_VOL_NAME" != "Unknown" ]]; then
+                if [[ -z "$DISK_INFO" ]]; then
+                    DISK_INFO="${BOOT_VOL_NAME} (${BOOT_VOL_SIZE}GB)"
+                else
+                    DISK_INFO="${DISK_INFO}; ${BOOT_VOL_NAME} (${BOOT_VOL_SIZE}GB)"
+                fi
+            fi
+        done
+
+        # Retrieve block volume attachments
+        BLOCK_VOL_ATTACHMENTS=$(oci compute volume-attachment list \
+            --compartment-id "$COMP_ID" \
+            --instance-id "$INSTANCE_ID" \
+            --region "$REGION" \
+            --output json 2>>"$LOG_FILE" || echo '{"data":[]}')
+
+        BLOCK_VOL_IDS=$(echo "$BLOCK_VOL_ATTACHMENTS" | jq -r '.data[] | select(."lifecycle-state"=="ATTACHED") | ."volume-id"')
+
+        for BLOCK_VOL_ID in $BLOCK_VOL_IDS; do
+            BLOCK_VOL_DATA=$(oci bv volume get \
+                --volume-id "$BLOCK_VOL_ID" \
+                --region "$REGION" \
+                --output json 2>>"$LOG_FILE" || echo '{"data":{}}')
+
+            BLOCK_VOL_NAME=$(echo "$BLOCK_VOL_DATA" | jq -r '.data."display-name" // "Unknown"')
+            BLOCK_VOL_SIZE=$(echo "$BLOCK_VOL_DATA" | jq -r '.data."size-in-gbs" // "0"')
+
+            if [[ -n "$BLOCK_VOL_NAME" && "$BLOCK_VOL_NAME" != "Unknown" ]]; then
+                if [[ -z "$DISK_INFO" ]]; then
+                    DISK_INFO="${BLOCK_VOL_NAME} (${BLOCK_VOL_SIZE}GB)"
+                else
+                    DISK_INFO="${DISK_INFO}; ${BLOCK_VOL_NAME} (${BLOCK_VOL_SIZE}GB)"
+                fi
+            fi
+        done
+
+        # Merge private IPs and disk information into instance data
+        ENHANCED_DATA=$(echo "$INSTANCE_DATA" | jq --arg ips "$PRIVATE_IPS" --arg disks "$DISK_INFO" '. + {"private-ips": $ips, "attached-disks": $disks}')
+
         # Write to JSON with proper comma separation
         if [[ $first -eq 0 ]]; then
             echo "," >> "$JSON_OUTPUT"
@@ -165,9 +222,9 @@ echo "Generating CSV report..."
 COMP_MAP_AWK=$(awk -F'\t' '{printf "comp[\"%s\"]=\"%s\"; ", $1, $2}' "${TEMP_DIR}/compartment_map.tsv")
 IMAGE_MAP_AWK=$(awk -F'\t' '{printf "img[\"%s\"]=\"%s\"; ", $1, $2}' "${TEMP_DIR}/image_map.tsv")
 
-# Convert JSON to CSV with column headers
+# Convert JSON to CSV with column headers including disk information
 jq -r --arg comp_map "$COMP_MAP_AWK" --arg image_map "$IMAGE_MAP_AWK" '
-    (["VM Name","OCID","Availability Domain","Shape","Compartment Name","Compartment OCID","Region","State","Time Created","Private IPs","Image Name","Image OCID"]),
+    (["VM Name","OCID","Availability Domain","Shape","Compartment Name","Compartment OCID","Region","State","Time Created","Private IPs","Attached Disks","Image Name","Image OCID"]),
     (.[] | [
         .["display-name"],
         .id,
@@ -179,6 +236,7 @@ jq -r --arg comp_map "$COMP_MAP_AWK" --arg image_map "$IMAGE_MAP_AWK" '
         .["lifecycle-state"],
         .["time-created"],
         (.["private-ips"] // ""),
+        (.["attached-disks"] // ""),
         .["image-id"],
         .["image-id"]
     ]) | @csv' "$JSON_OUTPUT" > "${TEMP_DIR}/vm_temp.csv"
@@ -193,18 +251,18 @@ awk -F',' -v OFS=',' '
     {
         comp_ocid = $6
         gsub(/"/, "", comp_ocid)
-        
-        image_ocid = $12
+
+        image_ocid = $13
         gsub(/"/, "", image_ocid)
-        
+
         if (comp_ocid in comp) {
             $5 = "\"" comp[comp_ocid] "\""
         }
-        
+
         if (image_ocid in img) {
-            $11 = "\"" img[image_ocid] "\""
+            $12 = "\"" img[image_ocid] "\""
         }
-        
+
         print
     }
 ' "${TEMP_DIR}/vm_temp.csv" > "$CSV_OUTPUT"
