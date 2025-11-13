@@ -5,9 +5,9 @@ set -euo pipefail
 ###############################################################################
 # OCI Compute Instance Inventory Export Script
 # Author: Amaan Ul Haq Siddiqui - DevOps Engineer
-# Description: Exports comprehensive inventory of OCI compute 
-#              instances including compartment names, network 
-#              configuration, and image metadata to JSON/CSV.
+# Description: Exports comprehensive inventory of OCI compute
+#              instances including compartment names, network
+#              configuration, image metadata, and attached disks.
 ###############################################################################
 
 # Configuration: Target region and output settings
@@ -95,6 +95,8 @@ for VM_JSON in "${VM_DATA[@]}"; do
     INSTANCE_IDS=$(echo "$VM_JSON" | jq -r '.data[].id')
 
     for INSTANCE_ID in $INSTANCE_IDS; do
+        echo "Processing instance: $INSTANCE_ID"
+        
         # Extract instance metadata
         INSTANCE_DATA=$(echo "$VM_JSON" | jq --arg id "$INSTANCE_ID" '.data[] | select(.id == $id)')
         COMP_ID=$(echo "$INSTANCE_DATA" | jq -r '.["compartment-id"]')
@@ -185,8 +187,27 @@ for VM_JSON in "${VM_DATA[@]}"; do
             fi
         done
 
-        # Merge private IPs and disk information into instance data
-        ENHANCED_DATA=$(echo "$INSTANCE_DATA" | jq --arg ips "$PRIVATE_IPS" --arg disks "$DISK_INFO" '. + {"private-ips": $ips, "attached-disks": $disks}')
+        # Extract shape configuration for vCPU and RAM
+        SHAPE_CONFIG=$(echo "$INSTANCE_DATA" | jq -r '.["shape-config"] // {}')
+        OCPU_COUNT=$(echo "$SHAPE_CONFIG" | jq -r '.ocpus // "0"')
+        MEMORY_GB=$(echo "$SHAPE_CONFIG" | jq -r '.["memory-in-gbs"] // "0"')
+        
+        # If shape-config doesn't have values, try to get from instance directly
+        if [[ "$OCPU_COUNT" == "0" || "$OCPU_COUNT" == "null" ]]; then
+            OCPU_COUNT="N/A"
+        fi
+        
+        if [[ "$MEMORY_GB" == "0" || "$MEMORY_GB" == "null" ]]; then
+            MEMORY_GB="N/A"
+        fi
+
+        # Merge all collected data into instance data
+        ENHANCED_DATA=$(echo "$INSTANCE_DATA" | jq \
+            --arg ips "$PRIVATE_IPS" \
+            --arg disks "$DISK_INFO" \
+            --arg vcpu "$OCPU_COUNT" \
+            --arg ram "$MEMORY_GB" \
+            '. + {"private-ips": $ips, "attached-disks": $disks, "vcpu-count": $vcpu, "memory-gb": $ram}')
 
         # Write to JSON with proper comma separation
         if [[ $first -eq 0 ]]; then
@@ -222,14 +243,16 @@ echo "Generating CSV report..."
 COMP_MAP_AWK=$(awk -F'\t' '{printf "comp[\"%s\"]=\"%s\"; ", $1, $2}' "${TEMP_DIR}/compartment_map.tsv")
 IMAGE_MAP_AWK=$(awk -F'\t' '{printf "img[\"%s\"]=\"%s\"; ", $1, $2}' "${TEMP_DIR}/image_map.tsv")
 
-# Convert JSON to CSV with column headers including disk information
-jq -r --arg comp_map "$COMP_MAP_AWK" --arg image_map "$IMAGE_MAP_AWK" '
-    (["VM Name","OCID","Availability Domain","Shape","Compartment Name","Compartment OCID","Region","State","Time Created","Private IPs","Attached Disks","Image Name","Image OCID"]),
+# Convert JSON to CSV with all column headers
+jq -r '
+    (["VM Name","OCID","Availability Domain","Shape","vCPU","RAM (GB)","Compartment Name","Compartment OCID","Region","State","Time Created","Private IPs","Attached Disks","Image Name","Image OCID"]),
     (.[] | [
         .["display-name"],
         .id,
         .["availability-domain"],
         .shape,
+        (.["vcpu-count"] // "N/A"),
+        (.["memory-gb"] // "N/A"),
         .["compartment-id"],
         .["compartment-id"],
         .region,
@@ -249,18 +272,18 @@ awk -F',' -v OFS=',' '
     }
     NR==1 {print; next}
     {
-        comp_ocid = $6
+        comp_ocid = $8
         gsub(/"/, "", comp_ocid)
 
-        image_ocid = $13
+        image_ocid = $15
         gsub(/"/, "", image_ocid)
 
         if (comp_ocid in comp) {
-            $5 = "\"" comp[comp_ocid] "\""
+            $7 = "\"" comp[comp_ocid] "\""
         }
 
         if (image_ocid in img) {
-            $12 = "\"" img[image_ocid] "\""
+            $14 = "\"" img[image_ocid] "\""
         }
 
         print
@@ -281,3 +304,8 @@ echo "JSON output: $JSON_OUTPUT"
 echo "CSV output: $CSV_OUTPUT"
 echo "Log file: $LOG_FILE"
 echo "-----------------------------------------------------------"
+
+# CSV Output Format:
+# | VM Name   | OCID              | Availability Domain | Shape               | vCPU | RAM (GB)  | Compartment  | Compartment OCID (short) | Region      | State   | Time Created         | Private IP   | Attached Disks                   | Image Name     | Image OCID (short) |
+# |-----------|-------------------|---------------------|---------------------|------|-----------|--------------|--------------------------|-------------|---------|----------------------|--------------|----------------------------------|----------------|--------------------|
+# | OCI-VM-01 | ocid1.inst...qdwa | ME-JEDDAH-1-AD-1    | VM.Standard.E4.Flex | 4    | 8         | APP          | ocid1.comp...z3pa        | me-jeddah-1 | RUNNING | 2023-09-04T09:06:25Z | 10.103.1.115 | OCI-VM-01 (Boot Volume) (100GB)  | rhel-cis-image | ocid1.imag...qgea  |
