@@ -96,7 +96,7 @@ stop_containers() {
     
     if [[ -n "$running_containers" ]]; then
         echo "Stopping running containers..."
-        echo "$running_containers" | while read container; do
+        for container in $running_containers; do
             local name=$(docker inspect --format='{{.Name}}' "$container" 2>/dev/null | sed 's/\///')
             echo "  - Stopping container: $name ($container)"
             if docker stop "$container" >/dev/null 2>&1; then
@@ -118,13 +118,11 @@ remove_containers() {
     
     if [[ -n "$all_containers" ]]; then
         echo "Removing all containers..."
-        local count=0
-        echo "$all_containers" | while read container; do
+        for container in $all_containers; do
             local name=$(docker inspect --format='{{.Name}}' "$container" 2>/dev/null | sed 's/\///' || echo "unknown")
             echo "  - Removing container: $name ($container)"
-            if docker rm "$container" >/dev/null 2>&1; then
+            if docker rm -f "$container" >/dev/null 2>&1; then
                 log "INFO" "Successfully removed container: $name ($container)"
-                ((count++))
             else
                 log "WARN" "Failed to remove container: $name ($container)"
             fi
@@ -143,14 +141,11 @@ remove_images() {
     
     if [[ -n "$all_images" ]]; then
         echo "Removing all images..."
-        local count=0
-        docker images --format "table {{.Repository}}:{{.Tag}}\t{{.ID}}" | grep -v "REPOSITORY:TAG" | while read image_info; do
-            local image_name=$(echo "$image_info" | awk '{print $1}')
-            local image_id=$(echo "$image_info" | awk '{print $2}')
+        for image_id in $all_images; do
+            local image_name=$(docker images --format "{{.Repository}}:{{.Tag}}" --filter "id=$image_id" 2>/dev/null | head -1)
             echo "  - Removing image: $image_name ($image_id)"
             if docker rmi -f "$image_id" >/dev/null 2>&1; then
                 log "INFO" "Successfully removed image: $image_name ($image_id)"
-                ((count++))
             else
                 log "WARN" "Failed to remove image: $image_name ($image_id)"
             fi
@@ -169,9 +164,9 @@ remove_volumes() {
     
     if [[ -n "$all_volumes" ]]; then
         echo "Removing all volumes..."
-        echo "$all_volumes" | while read volume; do
+        for volume in $all_volumes; do
             echo "  - Removing volume: $volume"
-            if docker volume rm "$volume" >/dev/null 2>&1; then
+            if docker volume rm -f "$volume" >/dev/null 2>&1; then
                 log "INFO" "Successfully removed volume: $volume"
             else
                 log "WARN" "Failed to remove volume: $volume"
@@ -191,7 +186,7 @@ remove_networks() {
     
     if [[ -n "$custom_networks" ]]; then
         echo "Removing custom networks..."
-        echo "$custom_networks" | while read network; do
+        for network in $custom_networks; do
             echo "  - Removing network: $network"
             if docker network rm "$network" >/dev/null 2>&1; then
                 log "INFO" "Successfully removed network: $network"
