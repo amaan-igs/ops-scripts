@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/opt/homebrew/bin/bash
 
 set -euo pipefail
 
@@ -296,14 +296,12 @@ rm -rf "$TEMP_DIR"
 # Calculate summary statistics
 TOTAL_VMS=$(jq 'length' "$JSON_OUTPUT")
 
-echo "-----------------------------------------------------------"
 echo "Inventory export completed successfully"
-echo "-----------------------------------------------------------"
+echo ""
 echo "Total instances discovered: $TOTAL_VMS"
 echo "JSON output: $JSON_OUTPUT"
 echo "CSV output: $CSV_OUTPUT"
 echo "Log file: $LOG_FILE"
-echo "-----------------------------------------------------------"
 
 # CSV Output Format:
 # | VM Name   | OCID              | Availability Domain | Shape               | vCPU | RAM (GB)  | Compartment  | Compartment OCID (short) | Region      | State   | Time Created         | Private IP   | Attached Disks                   | Image Name     | Image OCID (short) |
