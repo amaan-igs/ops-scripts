@@ -8,9 +8,15 @@
 # Usage: sudo ./docker-install.sh [OPTIONS]
 # Options:
 #   --non-root-user <username>  Add specified user to docker group for non-root access
+#                               Use "auto" to add the user who ran sudo
 #   --no-autostart              Do not configure Docker to start on boot
 #   --dry-run                   Show what would be installed without making changes
 #   -h, --help                  Display this help message
+#
+# Examples:
+#   sudo ./docker-install.sh                          # Install Docker
+#   sudo ./docker-install.sh --non-root-user auto     # Install and configure current user
+#   sudo ./docker-install.sh --non-root-user alice    # Install and add alice to docker group
 ################################################################################
 
 set -euo pipefail
@@ -27,6 +33,7 @@ NON_ROOT_USER=""
 ENABLE_AUTOSTART=true
 DRY_RUN=false
 LOG_FILE="/var/log/docker-install.log"
+SUDO_USER_ORIGINAL="${SUDO_USER:-}"
 
 ################################################################################
 # Functions
@@ -90,6 +97,9 @@ parse_arguments() {
         case "$1" in
             --non-root-user)
                 NON_ROOT_USER="$2"
+                if [[ "$NON_ROOT_USER" == "auto" && -n "$SUDO_USER_ORIGINAL" ]]; then
+                    NON_ROOT_USER="$SUDO_USER_ORIGINAL"
+                fi
                 shift 2
                 ;;
             --no-autostart)
@@ -223,9 +233,9 @@ verify_installation() {
             exit 1
         fi
 
-        # Check docker-compose
-        if ! command -v docker-compose &> /dev/null; then
-            error "docker-compose command not found"
+        # Check docker-compose (either plugin or standalone)
+        if ! docker compose version &> /dev/null && ! command -v docker-compose &> /dev/null; then
+            error "Docker Compose not found (neither plugin nor standalone)"
             exit 1
         fi
 
@@ -240,7 +250,11 @@ verify_installation() {
         # Display versions
         log "Docker version information:"
         docker --version | sed 's/^/  /'
-        docker-compose --version | sed 's/^/  /'
+        if command -v docker-compose &> /dev/null; then
+            docker-compose --version | sed 's/^/  /'
+        else
+            docker compose version | sed 's/^/  /'
+        fi
         containerd --version | sed 's/^/  /'
     else
         log "[DRY RUN] Would verify Docker installation"
@@ -332,12 +346,23 @@ main() {
     log "Installation log saved to: $LOG_FILE"
 
     if [[ "$DRY_RUN" == false ]]; then
+        log ""
+        log "Quick start:"
+        log "  • Test as root: sudo docker run hello-world"
+
         if [[ -n "$NON_ROOT_USER" ]]; then
-            log "Next steps:"
-            log "  1. User '$NON_ROOT_USER' must log out and log back in"
-            log "  2. Or run: newgrp docker"
+            log ""
+            log "Non-root user '$NON_ROOT_USER' configuration:"
+            log "  1. Option A - Log out and log back in (preferred)"
+            log "  2. Option B - Activate docker group now: newgrp docker"
+            log "  Then test: docker run hello-world"
+        else
+            log ""
+            log "To use Docker as a non-root user:"
+            log "  sudo usermod -aG docker <username>"
+            log "  newgrp docker  # Activate the group"
+            log "  docker run hello-world  # Test it"
         fi
-        log "Verify Docker is working: docker run hello-world"
     fi
 }
 
