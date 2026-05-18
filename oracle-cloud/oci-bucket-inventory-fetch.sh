@@ -21,13 +21,13 @@ TEMP_DIR="${OUTPUT_DIR}/temp"
 
 # Exclusion lists
 EXCLUDE_COMPARTMENTS=(
-    "ocid1.compartment.oc1..aaaaaaaauyqz5y3w5cbl5i6hgxtvwbztmrmepqa6wxjqlvnva7jlmgbrccia"
-    "ocid1.compartment.oc1..aaaaaaaa6julkn5rvic63xs6nsua3sltgs5ykrejlopqy6zsjbl46ajdepzq" 	
+    ""
+    "" 	
 )
 
 EXCLUDE_BUCKETS=(
-    "Backend-Storage"
-    "AWS-Archive"
+    ""
+    ""
 )
 
 # Initialize output directory structure
@@ -331,9 +331,8 @@ fi
 BUCKETS_WITH_AUTO_TIER=$(jq '[.[] | select(.["auto-tiering"] == "Enabled")] | length' "$JSON_OUTPUT")
 PUBLIC_BUCKETS=$(jq '[.[] | select(.visibility != "Private")] | length' "$JSON_OUTPUT")
 
-echo "-----------------------------------------------------------"
 echo "Object Storage Bucket inventory export completed successfully"
-echo "-----------------------------------------------------------"
+echo ""
 echo "Total buckets discovered: $TOTAL_BUCKETS"
 echo "Total objects across all buckets: $TOTAL_OBJECTS"
 echo "Total storage used: $TOTAL_SIZE_DISPLAY"
@@ -342,4 +341,3 @@ echo "Public buckets: $PUBLIC_BUCKETS"
 echo "JSON output: $JSON_OUTPUT"
 echo "CSV output: $CSV_OUTPUT"
 echo "Log file: $LOG_FILE"
-echo "-----------------------------------------------------------"

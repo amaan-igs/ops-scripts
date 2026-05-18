@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/opt/homebrew/bin/bash
 
 set -euo pipefail
 
@@ -364,9 +364,8 @@ TOTAL_WITH_BACKENDS=$(jq '[.[] | select(.["backends-attached"] == "Yes")] | leng
 TOTAL_HEALTHY=$(jq '[.[] | select(.["lb-health-status"] == "OK")] | length' "$JSON_OUTPUT")
 TOTAL_CRITICAL=$(jq '[.[] | select(.["lb-health-status"] == "Critical")] | length' "$JSON_OUTPUT")
 
-echo "-----------------------------------------------------------"
 echo "Load Balancer inventory export completed successfully"
-echo "-----------------------------------------------------------"
+echo ""
 echo "Total load balancers discovered: $TOTAL_LBS"
 echo "Load balancers with backends attached: $TOTAL_WITH_BACKENDS"
 echo "Healthy load balancers: $TOTAL_HEALTHY"
@@ -374,4 +373,3 @@ echo "Critical load balancers: $TOTAL_CRITICAL"
 echo "JSON output: $JSON_OUTPUT"
 echo "CSV output: $CSV_OUTPUT"
 echo "Log file: $LOG_FILE"
-echo "-----------------------------------------------------------"
